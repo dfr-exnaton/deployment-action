@@ -65,13 +65,19 @@ inputs:
   github-base-url:
     description: 'Changes the API base URL for a GitHub Enterprise server.'
     required: false
+  upsert:
+    description: 'If set to "true", first looks up an existing deployment matching the given parameters (ref, sha, task, environment) and returns it instead of creating a new one. If no matching deployment is found, a new one is created.'
+    required: false
+    default: 'false'
 outputs:
   deployment_id:
-    description: 'The ID of the created deployment'
+    description: 'The ID of the deployment (created or existing if upsert found a match)'
   deployment_url:
-    description: 'The URL of the created deployment'
+    description: 'The URL of the deployment (created or existing if upsert found a match)'
   environment_url:
     description: 'The environment URL of the deployment'
+  existing:
+    description: 'Whether an existing deployment was returned (true) or a new one was created (false). Only set when upsert is enabled.'
 runs:
   using: node20
   main: 'dist/index.js'
