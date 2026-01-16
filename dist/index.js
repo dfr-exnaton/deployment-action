@@ -86,6 +86,29 @@ function run() {
             const requiredContexts = core.getInput('required-contexts', {
                 required: false
             });
+            const upsert = core.getInput('upsert', { required: false }) === 'true';
+            // If upsert is enabled, first try to find an existing deployment
+            if (upsert) {
+                const existingDeployments = yield octokit.rest.repos.listDeployments({
+                    owner,
+                    repo,
+                    ref,
+                    sha,
+                    task: task !== '' ? task : undefined,
+                    environment,
+                    per_page: 1
+                });
+                if (existingDeployments.data.length > 0) {
+                    const existingDeployment = existingDeployments.data[0];
+                    core.info(`Found existing deployment (id: ${existingDeployment.id}) matching criteria, returning existing deployment`);
+                    core.setOutput('deployment_id', existingDeployment.id.toString());
+                    core.setOutput('deployment_url', existingDeployment.url);
+                    core.setOutput('environment_url', environmentUrl);
+                    core.setOutput('existing', 'true');
+                    return;
+                }
+                core.info('No existing deployment found, creating new deployment');
+            }
             const deployment = yield octokit.rest.repos.createDeployment({
                 owner,
                 repo,
@@ -117,6 +140,7 @@ function run() {
             core.setOutput('deployment_id', deployment.data.id.toString());
             core.setOutput('deployment_url', deployment.data.url);
             core.setOutput('environment_url', environmentUrl);
+            core.setOutput('existing', 'false');
         }
         catch (error) {
             core.error(error);
