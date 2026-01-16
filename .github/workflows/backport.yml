@@ -6,6 +6,11 @@ on:
     branches:
       - main
 
+# Permissions needed for git-backporting to push branches and create PRs
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   # Debug job to inspect event payload
   debug:
@@ -264,7 +269,7 @@ jobs:
         with:
           target-branch: ${{ matrix.target }}
           pull-request: ${{ github.event.pull_request.html_url }}
-          auth: ${{ secrets.ACTION_ACCESS_TOKEN }}
+          auth: ${{ github.token }}
           bp-branch-name: backport/${{ github.event.pull_request.number }}-to-${{ matrix.target }}
           title: "chore(backport): #${{ github.event.pull_request.number }} to ${{ matrix.target }}"
           body: |
