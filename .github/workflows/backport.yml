@@ -273,7 +273,7 @@ jobs:
           bp-branch-name: backport/${{ github.event.pull_request.number }}-to-${{ matrix.target }}
           title: "chore(backport): #${{ github.event.pull_request.number }} to ${{ matrix.target }}"
           body: |
-            ## 🔄 Backport
+            ## 🔄 Backport #${{ github.event.pull_request.number }}/${{ github.event.pull_request.title }}
 
             This PR backports #${{ github.event.pull_request.number }} to `${{ matrix.target }}`.
 
@@ -283,5 +283,5 @@ jobs:
 
             ---
             _This PR was automatically created by the backport workflow._
-          labels: backport, ${{ matrix.target }}
+          labels: backported
           inherit-labels: false
