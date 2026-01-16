@@ -14,6 +14,7 @@ jobs:
 
     permissions:
       deployments: write
+      contents: write
 
     # ...
 ```
