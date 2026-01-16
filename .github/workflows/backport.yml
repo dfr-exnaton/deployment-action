@@ -1,156 +1,281 @@
 name: Backport merged PRs
 
 on:
-    pull_request_target:
-        types: [closed, opened, synchronize, labeled]
-        branches:
-            - main
+  pull_request_target:
+    types: [closed, opened, synchronize, labeled]
+    branches:
+      - main
 
 jobs:
-    # Debug job to inspect event payload
-    debug:
-        name: Debug event
-        runs-on: ubuntu-latest
-        if: github.event.pull_request.merged
-        steps:
-            - name: Print event info
-              run: |
-                  echo "Action: ${{ github.event.action }}"
-                  echo "Merged: ${{ github.event.pull_request.merged }}"
-                  echo "Labels JSON: ${{ toJson(github.event.pull_request.labels) }}"
-                  echo "Contains backport: ${{ contains(toJson(github.event.pull_request.labels), 'backport') }}"
+  # Debug job to inspect event payload
+  debug:
+    name: Debug event
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged
+    steps:
+      - name: Print event info
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_ACCESS_TOKEN }}
+        run: |
+          echo "========== DEBUG: Event Information =========="
+          echo "Action: ${{ github.event.action }}"
+          echo "Merged: ${{ github.event.pull_request.merged }}"
+          echo "Target branch: ${{ github.event.pull_request.base.ref }}"
+          echo ""
+          echo "========== DEBUG: Labels =========="
+          echo "Labels JSON (full): ${{ toJson(github.event.pull_request.labels) }}"
+          echo ""
+          echo "Labels names only: ${{ toJson(github.event.pull_request.labels.*.name) }}"
+          echo ""
+          echo "Contains 'backport' (string check): ${{ contains(toJson(github.event.pull_request.labels), 'backport') }}"
+          echo ""
+          echo "========== DEBUG: Condition Evaluation for resolve-branches =========="
+          echo "github.event.pull_request.merged: ${{ github.event.pull_request.merged }}"
+          echo "github.event.action: ${{ github.event.action }}"
+          echo "github.event.label.name (if labeled action): ${{ github.event.label.name }}"
+          echo ""
+          echo "Condition breakdown:"
+          echo "  - (action == 'closed'): ${{ github.event.action == 'closed' }}"
+          echo "  - contains(labels, 'backport'): ${{ contains(toJson(github.event.pull_request.labels), 'backport') }}"
+          echo "  - (action == 'closed' && contains backport): ${{ github.event.action == 'closed' && contains(toJson(github.event.pull_request.labels), 'backport') }}"
+          echo ""
+          echo "  - (action == 'labeled'): ${{ github.event.action == 'labeled' }}"
+          echo "  - startsWith(label.name, 'backport'): ${{ startsWith(github.event.label.name, 'backport') }}"
+          echo "  - (action == 'labeled' && startsWith backport): ${{ github.event.action == 'labeled' && startsWith(github.event.label.name, 'backport') }}"
+          echo ""
+          echo "Final condition result (should be true to run resolve-branches):"
+          echo "  merged && ((closed && contains) || (labeled && startsWith))"
+          echo ""
+          echo "========== DEBUG: API Test =========="
+          echo "Testing GitHub API access..."
+          echo "RC_TAG from releases API:"
+          gh api repos/${{ github.repository }}/releases --jq '[.[] | select(.prerelease == true or .draft == true)] | first | .tag_name // empty' || echo "API call failed or no releases found"
+          echo ""
+          echo "All releases (names only):"
+          gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' 2>&1 || echo "Could not fetch releases"
+          echo "=============================================="
 
-    # Resolve target branches from backport labels
-    resolve-branches:
-        name: Resolve backport targets
-        runs-on: ubuntu-latest
-        if: >-
-            github.event.pull_request.merged &&
-            (
-              (github.event.action == 'closed' && contains(toJson(github.event.pull_request.labels), 'backport'))
-              || (github.event.action == 'labeled' && startsWith(github.event.label.name, 'backport'))
-            )
-        outputs:
-            matrix: ${{ steps.resolve.outputs.matrix }}
-            has_targets: ${{ steps.resolve.outputs.has_targets }}
-        steps:
-            - name: Resolve target branches from labels
-              id: resolve
-              env:
-                  GH_TOKEN: ${{ secrets.ACTION_ACCESS_TOKEN }}
-                  LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
-              run: |
-                  TARGETS=()
+  # Resolve target branches from backport labels
+  resolve-branches:
+    name: Resolve backport targets
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.merged &&
+      (
+        (github.event.action == 'closed' && contains(toJson(github.event.pull_request.labels), 'backport'))
+        || (github.event.action == 'labeled' && startsWith(github.event.label.name, 'backport'))
+      )
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      has_targets: ${{ steps.resolve.outputs.has_targets }}
+    steps:
+      - name: Resolve target branches from labels
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_ACCESS_TOKEN }}
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          echo "========== DEBUG: Starting label resolution =========="
+          echo "DEBUG: Repository: ${{ github.repository }}"
+          echo "DEBUG: Raw LABELS env var: $LABELS"
+          echo "DEBUG: Labels count: $(echo "$LABELS" | jq 'length')"
+          echo "DEBUG: Labels array contents:"
+          echo "$LABELS" | jq -r '.[] | "  - \(.)"'
+          echo "======================================================"
 
-                  for label in $(echo "$LABELS" | jq -r '.[]'); do
-                    case "$label" in
-                      "backport rc")
-                        # Find the latest release branch from releases API (pre-releases indicate RC)
-                        # Get the latest pre-release or draft release to find the RC branch
-                        RC_TAG=$(gh api repos/${{ github.repository }}/releases --jq '[.[] | select(.prerelease == true or .draft == true)] | first | .tag_name // empty')
-                        
-                        if [ -z "$RC_TAG" ]; then
-                          # Fallback: find latest release/v* branch directly
-                          RC_BRANCH=$(gh api repos/${{ github.repository }}/branches --paginate --jq '.[].name | select(startswith("release/v"))' | sort -V | tail -n 1)
-                        else
-                          # Extract branch from tag (e.g., v20250101.0-rc.1 -> release/v20250101)
-                          RC_BRANCH="release/v${RC_TAG#v}"
-                          RC_BRANCH="${RC_BRANCH%%-*}"
-                          RC_BRANCH="${RC_BRANCH%%.*}"
-                          
-                          # Verify branch exists, fallback to branch listing
-                          if ! gh api "repos/${{ github.repository }}/branches/${RC_BRANCH}" --silent 2>/dev/null; then
-                            RC_BRANCH=$(gh api repos/${{ github.repository }}/branches --paginate --jq '.[].name | select(startswith("release/v"))' | sort -V | tail -n 1)
-                          fi
-                        fi
-                        
-                        if [ -n "$RC_BRANCH" ]; then
-                          echo "Resolved 'backport rc' to: $RC_BRANCH"
-                          TARGETS+=("$RC_BRANCH")
-                        else
-                          echo "::warning::No release branch found for 'backport rc' label"
-                        fi
-                        ;;
-                        
-                      "backport production")
-                        # Find the branch of the latest production release (non-prerelease)
-                        PROD_BRANCH=$(gh api repos/${{ github.repository }}/releases/latest --jq '.target_commitish // empty' 2>/dev/null || echo "")
-                        
-                        if [ -z "$PROD_BRANCH" ]; then
-                          # Fallback to main
-                          PROD_BRANCH="main"
-                        fi
-                        
-                        echo "Resolved 'backport production' to: $PROD_BRANCH"
-                        TARGETS+=("$PROD_BRANCH")
-                        ;;
-                        
-                      backport\ *)
-                        # Generic pattern: "backport <branch>" -> backport to <branch>
-                        BRANCH="${label#backport }"
-                        if [ "$BRANCH" != "rc" ] && [ "$BRANCH" != "production" ]; then
-                          echo "Resolved '$label' to: $BRANCH"
-                          TARGETS+=("$BRANCH")
-                        fi
-                        ;;
-                    esac
-                  done
+          TARGETS=()
 
-                  # Remove duplicates and build matrix
-                  UNIQUE_TARGETS=($(printf '%s\n' "${TARGETS[@]}" | sort -u))
+          echo "DEBUG: Starting label processing loop..."
+          echo "DEBUG: NOTE - Using process substitution to handle labels with spaces correctly"
+          LABEL_INDEX=0
 
-                  if [ ${#UNIQUE_TARGETS[@]} -eq 0 ]; then
-                    echo "No backport targets found"
-                    echo "has_targets=false" >> $GITHUB_OUTPUT
-                    echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+          # Use process substitution to properly handle labels with spaces (e.g., "backport rc")
+          # and avoid subshell issues with array modifications
+          while IFS= read -r label; do
+            [ -z "$label" ] && continue
+            LABEL_INDEX=$((LABEL_INDEX + 1))
+            echo ""
+            echo "DEBUG: Processing label #$LABEL_INDEX: '$label'"
+            
+            case "$label" in
+              "backport rc")
+                echo "DEBUG: Matched 'backport rc' pattern"
+                # Find the latest release branch from releases API (pre-releases indicate RC)
+                # Get the latest pre-release or draft release to find the RC branch
+                echo "DEBUG: Fetching releases from API..."
+                RELEASES_RESPONSE=$(gh api repos/${{ github.repository }}/releases 2>&1) || echo "DEBUG: API call failed"
+                echo "DEBUG: Releases API response (first 500 chars): ${RELEASES_RESPONSE:0:500}"
+                
+                RC_TAG=$(echo "$RELEASES_RESPONSE" | jq -r '[.[] | select(.prerelease == true or .draft == true)] | first | .tag_name // empty')
+                echo "DEBUG: Extracted RC_TAG: '$RC_TAG'"
+                
+                if [ -z "$RC_TAG" ]; then
+                  echo "DEBUG: No RC tag found, falling back to branch listing..."
+                  # Fallback: find latest release/v* branch directly
+                  BRANCHES_RESPONSE=$(gh api repos/${{ github.repository }}/branches --paginate --jq '.[].name' 2>&1) || echo "DEBUG: Branches API call failed"
+                  echo "DEBUG: All branches: $BRANCHES_RESPONSE"
+                  RC_BRANCH=$(echo "$BRANCHES_RESPONSE" | grep '^release/v' | sort -V | tail -n 1)
+                  echo "DEBUG: Found RC_BRANCH from branch listing: '$RC_BRANCH'"
+                else
+                  # Extract branch from tag (e.g., v20250101.0-rc.1 -> release/v20250101)
+                  echo "DEBUG: Extracting branch from RC_TAG..."
+                  RC_BRANCH="release/v${RC_TAG#v}"
+                  echo "DEBUG: After removing 'v' prefix: '$RC_BRANCH'"
+                  RC_BRANCH="${RC_BRANCH%%-*}"
+                  echo "DEBUG: After removing '-*' suffix: '$RC_BRANCH'"
+                  RC_BRANCH="${RC_BRANCH%%.*}"
+                  echo "DEBUG: After removing '.*' suffix: '$RC_BRANCH'"
+                  
+                  # Verify branch exists, fallback to branch listing
+                  echo "DEBUG: Verifying branch '$RC_BRANCH' exists..."
+                  if ! gh api "repos/${{ github.repository }}/branches/${RC_BRANCH}" --silent 2>/dev/null; then
+                    echo "DEBUG: Branch '$RC_BRANCH' not found, falling back to branch listing..."
+                    RC_BRANCH=$(gh api repos/${{ github.repository }}/branches --paginate --jq '.[].name | select(startswith("release/v"))' | sort -V | tail -n 1)
+                    echo "DEBUG: Fallback RC_BRANCH: '$RC_BRANCH'"
                   else
-                    echo "Target branches: ${UNIQUE_TARGETS[*]}"
-                    echo "has_targets=true" >> $GITHUB_OUTPUT
-                    
-                    # Build JSON matrix
-                    MATRIX_JSON='{"include":['
-                    FIRST=true
-                    for branch in "${UNIQUE_TARGETS[@]}"; do
-                      if [ "$FIRST" = true ]; then
-                        FIRST=false
-                      else
-                        MATRIX_JSON+=','
-                      fi
-                      MATRIX_JSON+="{\"target\":\"$branch\"}"
-                    done
-                    MATRIX_JSON+=']}'
-                    
-                    echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+                    echo "DEBUG: Branch '$RC_BRANCH' verified to exist"
                   fi
+                fi
+                
+                if [ -n "$RC_BRANCH" ]; then
+                  echo "DEBUG: Adding '$RC_BRANCH' to TARGETS"
+                  echo "Resolved 'backport rc' to: $RC_BRANCH"
+                  TARGETS+=("$RC_BRANCH")
+                else
+                  echo "DEBUG: RC_BRANCH is empty, not adding to TARGETS"
+                  echo "::warning::No release branch found for 'backport rc' label"
+                fi
+                ;;
+                
+              "backport production")
+                echo "DEBUG: Matched 'backport production' pattern"
+                # Find the branch of the latest production release (non-prerelease)
+                echo "DEBUG: Fetching latest release..."
+                LATEST_RELEASE=$(gh api repos/${{ github.repository }}/releases/latest 2>&1) || echo "DEBUG: Latest release API call failed: $LATEST_RELEASE"
+                echo "DEBUG: Latest release response: $LATEST_RELEASE"
+                
+                PROD_BRANCH=$(echo "$LATEST_RELEASE" | jq -r '.target_commitish // empty' 2>/dev/null || echo "")
+                echo "DEBUG: Extracted PROD_BRANCH: '$PROD_BRANCH'"
+                
+                if [ -z "$PROD_BRANCH" ]; then
+                  # Fallback to main
+                  echo "DEBUG: PROD_BRANCH is empty, falling back to 'main'"
+                  PROD_BRANCH="main"
+                fi
+                
+                echo "DEBUG: Adding '$PROD_BRANCH' to TARGETS"
+                echo "Resolved 'backport production' to: $PROD_BRANCH"
+                TARGETS+=("$PROD_BRANCH")
+                ;;
+                
+              backport\ *)
+                echo "DEBUG: Matched 'backport *' pattern"
+                # Generic pattern: "backport <branch>" -> backport to <branch>
+                BRANCH="${label#backport }"
+                echo "DEBUG: Extracted branch name: '$BRANCH'"
+                if [ "$BRANCH" != "rc" ] && [ "$BRANCH" != "production" ]; then
+                  echo "DEBUG: Adding '$BRANCH' to TARGETS"
+                  echo "Resolved '$label' to: $BRANCH"
+                  TARGETS+=("$BRANCH")
+                else
+                  echo "DEBUG: Skipping '$BRANCH' (handled by specific pattern)"
+                fi
+                ;;
+                
+              *)
+                echo "DEBUG: Label '$label' did not match any backport pattern, skipping"
+                ;;
+            esac
+          done < <(echo "$LABELS" | jq -r '.[]')
 
-    # Backport to each target branch
-    backport:
-        name: Backport to ${{ matrix.target }}
-        needs: resolve-branches
-        if: needs.resolve-branches.outputs.has_targets == 'true'
-        runs-on: ubuntu-latest
-        strategy:
-            fail-fast: false
-            matrix: ${{ fromJson(needs.resolve-branches.outputs.matrix) }}
-        steps:
-            - name: Backport PR
-              uses: kiegroup/git-backporting@v4
-              with:
-                  target-branch: ${{ matrix.target }}
-                  pull-request: ${{ github.event.pull_request.html_url }}
-                  auth: ${{ secrets.ACTION_ACCESS_TOKEN }}
-                  bp-branch-name: backport/${{ github.event.pull_request.number }}-to-${{ matrix.target }}
-                  title: "chore(backport): #${{ github.event.pull_request.number }} to ${{ matrix.target }}"
-                  body: |
-                      ## 🔄 Backport
+          echo ""
+          echo "========== DEBUG: Label processing complete =========="
+          echo "DEBUG: TARGETS array contents (${#TARGETS[@]} items):"
+          for i in "${!TARGETS[@]}"; do
+            echo "  DEBUG: TARGETS[$i] = '${TARGETS[$i]}'"
+          done
 
-                      This PR backports #${{ github.event.pull_request.number }} to `${{ matrix.target }}`.
+          # Remove duplicates and build matrix
+          echo "DEBUG: Removing duplicates..."
+          UNIQUE_TARGETS=($(printf '%s\n' "${TARGETS[@]}" | sort -u))
+          echo "DEBUG: UNIQUE_TARGETS array contents (${#UNIQUE_TARGETS[@]} items):"
+          for i in "${!UNIQUE_TARGETS[@]}"; do
+            echo "  DEBUG: UNIQUE_TARGETS[$i] = '${UNIQUE_TARGETS[$i]}'"
+          done
 
-                      **Original PR:** #${{ github.event.pull_request.number }}
-                      **Original Title:** ${{ github.event.pull_request.title }}
-                      **Target Branch:** `${{ matrix.target }}`
+          if [ ${#UNIQUE_TARGETS[@]} -eq 0 ]; then
+            echo "DEBUG: No targets found, setting has_targets=false"
+            echo "No backport targets found"
+            echo "has_targets=false" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+          else
+            echo "DEBUG: Found ${#UNIQUE_TARGETS[@]} target(s), setting has_targets=true"
+            echo "Target branches: ${UNIQUE_TARGETS[*]}"
+            echo "has_targets=true" >> $GITHUB_OUTPUT
+            
+            # Build JSON matrix
+            MATRIX_JSON='{"include":['
+            FIRST=true
+            for branch in "${UNIQUE_TARGETS[@]}"; do
+              echo "DEBUG: Adding branch '$branch' to matrix JSON"
+              if [ "$FIRST" = true ]; then
+                FIRST=false
+              else
+                MATRIX_JSON+=','
+              fi
+              MATRIX_JSON+="{\"target\":\"$branch\"}"
+            done
+            MATRIX_JSON+=']}'
+            
+            echo "DEBUG: Final matrix JSON: $MATRIX_JSON"
+            echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          fi
 
-                      ---
-                      _This PR was automatically created by the backport workflow._
-                  labels: backport, ${{ matrix.target }}
-                  inherit-labels: false
+          echo ""
+          echo "========== DEBUG: Step outputs =========="
+          echo "DEBUG: Contents of GITHUB_OUTPUT file:"
+          cat $GITHUB_OUTPUT
+
+  # Backport to each target branch
+  backport:
+    name: Backport to ${{ matrix.target }}
+    needs: resolve-branches
+    if: needs.resolve-branches.outputs.has_targets == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve-branches.outputs.matrix) }}
+    steps:
+      - name: Debug backport inputs
+        run: |
+          echo "========== DEBUG: Backport job inputs =========="
+          echo "DEBUG: needs.resolve-branches.outputs.has_targets = '${{ needs.resolve-branches.outputs.has_targets }}'"
+          echo "DEBUG: needs.resolve-branches.outputs.matrix = '${{ needs.resolve-branches.outputs.matrix }}'"
+          echo "DEBUG: matrix.target = '${{ matrix.target }}'"
+          echo "DEBUG: github.event.pull_request.html_url = '${{ github.event.pull_request.html_url }}'"
+          echo "DEBUG: github.event.pull_request.number = '${{ github.event.pull_request.number }}'"
+          echo "DEBUG: github.event.pull_request.title = '${{ github.event.pull_request.title }}'"
+          echo "DEBUG: Backport branch name will be: 'backport/${{ github.event.pull_request.number }}-to-${{ matrix.target }}'"
+          echo "================================================"
+
+      - name: Backport PR
+        uses: kiegroup/git-backporting@v4
+        with:
+          target-branch: ${{ matrix.target }}
+          pull-request: ${{ github.event.pull_request.html_url }}
+          auth: ${{ secrets.ACTION_ACCESS_TOKEN }}
+          bp-branch-name: backport/${{ github.event.pull_request.number }}-to-${{ matrix.target }}
+          title: "chore(backport): #${{ github.event.pull_request.number }} to ${{ matrix.target }}"
+          body: |
+            ## 🔄 Backport
+
+            This PR backports #${{ github.event.pull_request.number }} to `${{ matrix.target }}`.
+
+            **Original PR:** #${{ github.event.pull_request.number }}
+            **Original Title:** ${{ github.event.pull_request.title }}
+            **Target Branch:** `${{ matrix.target }}`
+
+            ---
+            _This PR was automatically created by the backport workflow._
+          labels: backport, ${{ matrix.target }}
+          inherit-labels: false
