@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Print event info
         env:
-          GH_TOKEN: ${{ secrets.ACTION_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "========== DEBUG: Event Information =========="
           echo "Action: ${{ github.event.action }}"
@@ -73,7 +73,7 @@ jobs:
       - name: Resolve target branches from labels
         id: resolve
         env:
-          GH_TOKEN: ${{ secrets.ACTION_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
           echo "========== DEBUG: Starting label resolution =========="
